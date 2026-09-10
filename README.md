@@ -1,149 +1,212 @@
-# iotdborm
+# IoTDB ORM - 轻量级IoTDB操作库
 
-GORM 风格的 Apache IoTDB ORM 库，为 Go 开发者提供熟悉的数据访问接口。
+为Apache IoTDB树形模型设计的轻量级ORM库，模仿GORM的API风格，基于官方客户端 `apache/iotdb-client-go` 实现。
 
-## 功能特性
+## 特性
 
-- **GORM 风格 API**：链式查询 `Where().Order().Find()`，零学习成本
-- **结构体映射**：通过 `iotdb` / `gorm` 标签自动映射字段到 IoTDB 测点
-- **高性能批量写入**：内部使用 Tablet API，支持自定义批大小
-- **连接池管理**：内置 SessionPool，支持连接复用
-- **查询构建器**：QueryBuilder 支持复杂条件组合
-- **内存 Mock**：无需真实 IoTDB 即可运行示例和测试
-- **元数据管理**：MemoryDeviceMetadataManager 支持设备注册和跨设备查询
+- 🚀 **高性能**: 使用Tablet批量写入，避免单条插入性能问题
+- 🎯 **树形模型适配**: 专为IoTDB树形路径模型（`root.a.b.c`）设计
+- 🔧 **GORM风格API**: 提供类似GORM的链式调用API
+- 📊 **类型安全**: 完整的Go类型到IoTDB数据类型映射
+- 🔄 **SessionPool管理**: 自动连接池管理
+- 📝 **原生SQL支持**: 支持执行原生IoTDB SQL（`Raw`）
+- 🏗️ **元数据管理**: 内置设备元数据管理器，支持跨设备查询
+- 🏷️ **双标签支持**: 支持 `iotdb` 与 `gorm` 标签解析，便于从GORM迁移
+- 🧪 **完整测试**: 单元测试 + 基于内存后端的集成测试
+- 🧫 **离线体验**: 提供内存mock后端，无需真实IoTDB服务即可运行示例
 
-## 安装
+## 适用版本
 
-```bash
-go get iotdborm
-```
+### IoTDB 服务端
+
+| 服务端版本 | 兼容性 | 说明 |
+|-----------|--------|------|
+| **1.3.x** | ✅ 官方支持 | 客户端 v1.3.7 与服务端 1.3.x 系列配套发布，本项目在本机 **1.3.1** 实测通过（建序列、Tablet批量写入、查询均正常） |
+| 1.0 ~ 1.2.x | ⚠️ 理论兼容 | 基于 V3 会话协议（自 1.0 引入），协议层面兼容，但未实测验证 |
+| 0.13 及更早 | ❌ 不支持 | 无 V3 会话协议 |
+| 2.x | ❌ 不推荐 | 2.x 表模型应使用官方 2.0.x 客户端；本库为树形模型设计，未对 2.x 验证 |
+
+**结论：推荐使用 Apache IoTDB 1.3.x（1.3.1 ~ 1.3.7 均在本库兼容范围内）。**
+
+### 客户端依赖
+
+- `github.com/apache/iotdb-client-go v1.3.7`（与服务端 1.3.x 配套的 1.3 系列客户端）
+- Go 1.21+
+
+### 已知服务端缺陷（已规避）
+
+- **IoTDB 1.3.1**：SELECT 列表中显式包含 `time` 列（如 `SELECT time, temperature FROM root.x`）会导致服务端异常断开连接，客户端表现为 `EOF`。IoTDB 查询总是隐式返回 time 作为第一列，因此本库在生成 SQL 时会**自动过滤** Select 中的 time 列；原生 SQL（`Raw`）也请勿显式查询 time 列。更高版本是否已修复未逐一验证，本库行为在所有版本下一致安全。
 
 ## 快速开始
 
+### 定义数据结构
+
 ```go
-package main
-
-import (
-    "log"
-    "time"
-
-    "iotdborm"
-)
-
-// 定义设备数据结构
 type DeviceMetric struct {
-    Time        int64   `iotdb:"time"`
-    Temperature float64 `iotdb:"temperature"`
+    Time        int64   `iotdb:"time"`        // 时间戳（int64毫秒），自动映射
+    Temperature float64 `iotdb:"temperature"` // 测点名称
     Pressure    float64 `iotdb:"pressure"`
     Humidity    float64 `iotdb:"humidity"`
 }
+```
 
-func main() {
-    // 1. 创建 SessionPool
-    pool, err := iotdborm.NewSessionPool("127.0.0.1", 6667, "root", "root", 5)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer pool.Close()
+### 创建连接与仓库
 
-    // 2. 创建 Repository，绑定设备路径
-    devicePath := "root.factory.workshop01.device01"
-    repo := iotdborm.NewRepo(pool, devicePath)
+```go
+pool, err := iotdborm.NewSessionPool("127.0.0.1", 6667, "root", "root", 5)
+if err != nil {
+    log.Fatal(err)
+}
+defer pool.Close()
 
-    // 3. 初始化时间序列
-    metadata, _ := iotdborm.NewDeviceMetadata(devicePath, DeviceMetric{})
-    repo.CreateTimeseries(metadata)
+repo := iotdborm.NewRepo(pool, "root.factory.workshop01.device01")
+```
 
-    // 4. 写入数据
-    repo.Create(&DeviceMetric{
-        Time:        time.Now().UnixMilli(),
-        Temperature: 26.5,
-        Pressure:    101.2,
-        Humidity:    65.0,
-    })
+### 初始化时间序列（首次运行）
 
-    // 5. 查询数据
-    var results []DeviceMetric
-    repo.Where("time >= ?", time.Now().Add(-time.Hour).UnixMilli()).
-        Order("time", true).
-        Limit(10).
-        Find(&results)
+```go
+metadata, err := iotdborm.NewDeviceMetadata("root.factory.workshop01.device01", DeviceMetric{})
+if err != nil {
+    log.Fatal(err)
+}
+if err := repo.CreateTimeseries(metadata); err != nil {
+    // 时间序列已存在时会报错，可忽略
 }
 ```
 
-## API 示例
-
-### 条件查询
+### 写入数据
 
 ```go
-var results []DeviceMetric
-repo.Where("temperature > ?", 25.0).
-    Or("pressure > ?", 100.0).
-    Order("time", true).
-    Limit(100).
-    Offset(0).
-    Find(&results)
+// 单条写入
+err = repo.Create(&DeviceMetric{
+    Time:        time.Now().UnixMilli(),
+    Temperature: 26.5,
+    Pressure:    101.2,
+    Humidity:    65.0,
+})
+
+// 批量写入（Tablet高性能写入）
+var batch []DeviceMetric
+for i := 0; i < 1000; i++ {
+    batch = append(batch, DeviceMetric{
+        Time:        time.Now().Add(time.Duration(i) * time.Second).UnixMilli(),
+        Temperature: 25.0 + float64(i)*0.1,
+    })
+}
+err = repo.CreateInBatches(batch, 100) // 每批100条
 ```
 
-### 指定字段查询
+### 查询数据
 
 ```go
+// 查询全部
+var all []DeviceMetric
+err = repo.Find(&all)
+
+// 链式条件查询（Where支持 ? 占位符）
+var recent []DeviceMetric
+err = repo.
+    Where("time >= ? AND time <= ?", time.Now().Add(-time.Hour).UnixMilli(), time.Now().UnixMilli()).
+    Order("time", true).
+    Limit(100).
+    Find(&recent)
+
+// 查询第一条（GORM风格，直接传结构体指针）
+var first DeviceMetric
+err = repo.Order("time", true).First(&first)
+
+// 指定字段查询（无需选择time列，自动返回）
 var temps []struct {
     Time        int64   `iotdb:"time"`
     Temperature float64 `iotdb:"temperature"`
 }
-repo.Select("temperature").Limit(5).Find(&temps)
+err = repo.Select("temperature").Find(&temps)
+
+// QueryBuilder 复杂查询
+builder := iotdborm.NewQueryBuilder(repo)
+var data []DeviceMetric
+err = builder.
+    Where("time >= ?", time.Now().Add(-time.Hour).UnixMilli()).
+    Where("temperature < ?", 30.0).
+    Or("pressure > ?", 105.0).
+    Select("temperature", "pressure").
+    Order("time", false).
+    Limit(50).
+    Find(&data)
+
+// 原生SQL查询
+rawSQL := "SELECT temperature FROM root.factory.workshop01.device01 WHERE time >= " +
+    fmt.Sprintf("%d", time.Now().Add(-30*time.Minute).UnixMilli()) + " ORDER BY time DESC LIMIT 10"
+var raw []DeviceMetric
+err = repo.Raw(rawSQL, &raw)
 ```
 
-### 批量写入
+### 设备元数据管理（跨设备查询）
 
 ```go
-batch := []DeviceMetric{
-    {Time: now, Temperature: 25.0, Pressure: 100.0, Humidity: 60.0},
-    {Time: now + 60000, Temperature: 25.5, Pressure: 100.2, Humidity: 60.3},
+manager := iotdborm.NewMemoryDeviceMetadataManager()
+
+type DeviceInfo struct {
+    DeviceId string `iotdb:"device_path"`
+    Region   string `gorm:"tag:region"`
+    Status   bool   `gorm:"tag:status"`
 }
-repo.CreateInBatches(batch, 100) // 每批 100 条
-```
 
-### 原生 SQL 查询
+// 注册设备：deviceId -> devicePath 映射 + 标签索引
+err = manager.RegisterDevice("root.factory.north.device01", DeviceInfo{DeviceId: "d01", Region: "north", Status: true})
 
-```go
-var results []DeviceMetric
-sql := "SELECT temperature FROM root.factory.device01 WHERE time >= 1000 ORDER BY time DESC LIMIT 3"
-repo.Raw(sql, &results)
+// 按标签筛选设备
+deviceIds, err := manager.ListDevicesByTag("region", "north")
+
+// 带元数据管理的仓库：写入时自动把 deviceId 解析为设备路径
+repo := iotdborm.NewRepoWithMetadata(pool, "", manager)
+err = repo.Create(&data{DeviceId: "d01", ...})
 ```
 
 ## 项目结构
 
 ```
-iotdborm/
-├── repo.go          # 核心 Repository 实现
-├── query.go         # 查询构建与结果映射
-├── write.go         # 批量写入与时间序列创建
-├── builder.go       # QueryBuilder 查询构建器
-├── pool.go          # SessionPool 连接池
-├── types.go         # 类型定义与映射
-├── metadata.go      # 设备元数据管理
-├── reflect.go       # 反射工具函数
-├── mock/            # 内存 Mock 实现
-└── examples/        # 使用示例
-    ├── basic/       # 基础示例
-    ├── query/       # 查询示例
-    ├── metadata/    # 元数据管理示例
-    └── mock/        # Mock 示例
+iotdb_repo2/                     # 库本体（module: iotdborm）
+├── go.mod
+├── types.go                     # 类型映射与元数据结构
+├── pool.go                      # Session/SessionPool/ResultSet 抽象 + 官方客户端适配
+├── repo.go                      # MetricRepo 接口、链式API、CRUD
+├── write.go                     # Tablet 批量写入、时间序列创建
+├── query.go                     # 查询SQL构建、结果反射填充
+├── reflect.go                   # 结构体标签解析（iotdb/gorm）
+├── builder.go                   # QueryBuilder
+├── metadata.go                  # 设备元数据管理器
+├── mock/                        # 内存后端（无需真实IoTDB）
+├── iotdborm_test.go             # 单元测试
+└── integration_test.go          # 基于mock的集成测试
+examples/                        # 演示用例（独立module，replace引入本库）
+├── basic/                       # 完整生命周期演示（需真实IoTDB）
+├── query/                       # QueryBuilder复杂查询演示（需真实IoTDB）
+├── metadata/                    # 设备元数据管理演示（需真实IoTDB）
+├── mock/                        # 离线演示（无需IoTDB）
+└── diag/                        # 官方客户端诊断程序（排查服务端问题用）
 ```
 
 ## 运行示例
 
 ```bash
-# 基础示例（需要 IoTDB 服务）
-cd examples/basic
-go run . -host 127.0.0.1 -port 6667 -user root -password root
-
-# Mock 示例（无需 IoTDB）
+# 离线体验（无需IoTDB服务）
 cd examples/mock
 go run .
+
+# 连接真实IoTDB（默认 127.0.0.1:6667 root/root）
+cd examples/basic
+go run . -host 127.0.0.1 -port 6667 -user root -password root
 ```
+
+## 注意事项
+
+1. **time列**: 不要在 Select 或原生SQL中显式查询 time 列（IoTDB 1.3.1 服务端缺陷会导致连接断开报EOF），time 列总是自动作为结果第一列返回；WHERE/ORDER BY 中使用 time 是安全的
+2. **时间字段**: 结构体中 `Time int64`（毫秒）自动映射为IoTDB时间戳
+3. **批量写入**: 强烈建议使用 `CreateInBatches`（Tablet批量），性能远优于单条 `Create`
+4. **连接池**: SessionPool 全局复用，不要频繁创建销毁
+5. **标签解析**: 优先 `iotdb` 标签，其次 `gorm` 标签（column/tag），最后使用字段名；`iotdb:"-"` 排除字段
+6. **不支持的操作**: IoTDB 不支持 Update/Delete，调用会返回错误说明；事务接口为占位实现
 
 ## 许可证
 
