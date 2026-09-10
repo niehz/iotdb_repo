@@ -1,4 +1,4 @@
-module iotdborm
+module github.com/niehz/iotdb_repo
 
 go 1.21
 

@@ -11,7 +11,7 @@ import (
 
 	"github.com/apache/iotdb-client-go/client"
 
-	"iotdborm"
+	"github.com/niehz/iotdb_repo"
 )
 
 // Point 单个数据点

@@ -37,11 +37,28 @@
 
 - **IoTDB 1.3.1**：SELECT 列表中显式包含 `time` 列（如 `SELECT time, temperature FROM root.x`）会导致服务端异常断开连接，客户端表现为 `EOF`。IoTDB 查询总是隐式返回 time 作为第一列，因此本库在生成 SQL 时会**自动过滤** Select 中的 time 列；原生 SQL（`Raw`）也请勿显式查询 time 列。更高版本是否已修复未逐一验证，本库行为在所有版本下一致安全。
 
+## 安装
+
+```bash
+go get github.com/niehz/iotdb_repo
+```
+
+> 说明：**导入路径是 `github.com/niehz/iotdb_repo`，包名是 `iotdborm`**。
+> 代码中 import 写全路径，调用时直接用包名 `iotdborm.xxx`，无需别名：
+
+```go
+import "github.com/niehz/iotdb_repo" // 包名为 iotdborm
+
+repo := iotdborm.NewRepo(pool, "root.factory.workshop01.device01")
+```
+
 ## 快速开始
 
 ### 定义数据结构
 
 ```go
+import "github.com/niehz/iotdb_repo" // 包名 iotdborm
+
 type DeviceMetric struct {
     Time        int64   `iotdb:"time"`        // 时间戳（int64毫秒），自动映射
     Temperature float64 `iotdb:"temperature"` // 测点名称
@@ -166,7 +183,7 @@ err = repo.Create(&data{DeviceId: "d01", ...})
 ## 项目结构
 
 ```
-iotdb_repo2/                     # 库本体（module: iotdborm）
+iotdb_repo/                      # 库本体（module: github.com/niehz/iotdb_repo，包名 iotdborm）
 ├── go.mod
 ├── types.go                     # 类型映射与元数据结构
 ├── pool.go                      # Session/SessionPool/ResultSet 抽象 + 官方客户端适配
@@ -179,7 +196,7 @@ iotdb_repo2/                     # 库本体（module: iotdborm）
 ├── mock/                        # 内存后端（无需真实IoTDB）
 ├── iotdborm_test.go             # 单元测试
 └── integration_test.go          # 基于mock的集成测试
-examples/                        # 演示用例（独立module，replace引入本库）
+examples/                        # 演示用例（独立module，通过 replace github.com/niehz/iotdb_repo => ../ 引入本库）
 ├── basic/                       # 完整生命周期演示（需真实IoTDB）
 ├── query/                       # QueryBuilder复杂查询演示（需真实IoTDB）
 ├── metadata/                    # 设备元数据管理演示（需真实IoTDB）

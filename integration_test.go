@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"iotdborm"
-	"iotdborm/mock"
+	"github.com/niehz/iotdb_repo"
+	"github.com/niehz/iotdb_repo/mock"
 )
 
 type metric struct {

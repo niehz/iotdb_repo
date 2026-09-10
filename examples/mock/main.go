@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	"iotdborm"
-	"iotdborm/mock"
+	"github.com/niehz/iotdb_repo"
+	"github.com/niehz/iotdb_repo/mock"
 )
 
 // DeviceMetric 设备测点数据结构

@@ -13,7 +13,7 @@ import (
 	"log"
 	"time"
 
-	"iotdborm"
+	"github.com/niehz/iotdb_repo"
 )
 
 // DeviceMetric 设备测点数据结构

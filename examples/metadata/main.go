@@ -15,7 +15,7 @@ import (
 	"log"
 	"time"
 
-	"iotdborm"
+	"github.com/niehz/iotdb_repo"
 )
 
 // DeviceInfo 设备注册信息（仅用于元数据管理）

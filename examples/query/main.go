@@ -16,7 +16,7 @@ import (
 	"log"
 	"time"
 
-	"iotdborm"
+	"github.com/niehz/iotdb_repo"
 )
 
 // DeviceMetric 设备测点数据结构，支持 gorm 与 iotdb 双标签
