@@ -10,7 +10,7 @@
 - 📊 **类型安全**: 完整的Go类型到IoTDB数据类型映射
 - 🔄 **SessionPool管理**: 自动连接池管理
 - 📝 **原生SQL支持**: 支持执行原生IoTDB SQL（`Raw`）
-- 🏗️ **元数据管理**: 内置设备元数据管理器，支持跨设备查询
+- 🏗️ **元数据管理**: 约定路径管理器（模板自动拼路径、show timeseries 自动发现设备），支持跨设备查询
 - 🏷️ **双标签支持**: 支持 `iotdb` 与 `gorm` 标签解析，便于从GORM迁移
 - 🧪 **完整测试**: 单元测试 + 基于内存后端的集成测试
 - 🧫 **离线体验**: 提供内存mock后端，无需真实IoTDB服务即可运行示例
@@ -160,24 +160,39 @@ err = repo.Raw(rawSQL, &raw)
 
 ### 设备元数据管理（跨设备查询）
 
-```go
-manager := iotdborm.NewMemoryDeviceMetadataManager()
+**推荐：约定路径管理器**——路径由模板自动生成，标签即路径段，无需手工维护 deviceId↔路径 映射：
 
+```go
 type DeviceInfo struct {
     DeviceId string `iotdb:"device_path"`
-    Region   string `gorm:"tag:region"`
+    Region   string `gorm:"tag:region"`   // gorm:"tag:xxx" 填充模板中的 {xxx} 占位符
     Status   bool   `gorm:"tag:status"`
 }
 
-// 注册设备：deviceId -> devicePath 映射 + 标签索引
-err = manager.RegisterDevice("root.factory.north.device01", DeviceInfo{DeviceId: "d01", Region: "north", Status: true})
+// 模板 root.factory.{region}.{deviceId}：region 是标签也是路径段
+manager, err := iotdborm.NewConventionPathManager("root.factory.{region}.{deviceId}", pool)
 
-// 按标签筛选设备
+// 注册只传设备信息，路径自动生成
+err = manager.RegisterDeviceAuto(DeviceInfo{DeviceId: "d01", Region: "north", Status: true})
+
+// 按标签筛选设备：直查IoTDB（show timeseries 前缀扫描），新设备无需注册即可见
 deviceIds, err := manager.ListDevicesByTag("region", "north")
 
-// 带元数据管理的仓库：写入时自动把 deviceId 解析为设备路径
+// 自动发现设备路径 / 一键同步存量设备
+paths, err := manager.ListDevicePaths("root.factory.**")
+n, err := manager.SyncDevices("root.factory.**")
+
+// 带元数据管理的仓库：写入时自动解析路径，未注册的设备也能按模板零注册直写
 repo := iotdborm.NewRepoWithMetadata(pool, "", manager)
-err = repo.Create(&data{DeviceId: "d01", ...})
+err = repo.Create(&data{DeviceId: "d01", Region: "north", ...})
+```
+
+**路径无稳定规律时**，使用内存元数据管理器显式注册：
+
+```go
+manager := iotdborm.NewMemoryDeviceMetadataManager()
+err = manager.RegisterDevice("root.factory.north.device01", DeviceInfo{DeviceId: "d01", Region: "north", Status: true})
+deviceIds, err := manager.ListDevicesByTag("region", "north")
 ```
 
 ## 项目结构
@@ -192,7 +207,8 @@ iotdb_repo/                      # 库本体（module: github.com/niehz/iotdb_re
 ├── query.go                     # 查询SQL构建、结果反射填充
 ├── reflect.go                   # 结构体标签解析（iotdb/gorm）
 ├── builder.go                   # QueryBuilder
-├── metadata.go                  # 设备元数据管理器
+├── metadata.go                  # 设备元数据管理器（内存实现）
+├── convention.go                # 约定路径管理器（模板自动拼路径 + show timeseries 自动发现）
 ├── mock/                        # 内存后端（无需真实IoTDB）
 ├── iotdborm_test.go             # 单元测试
 └── integration_test.go          # 基于mock的集成测试

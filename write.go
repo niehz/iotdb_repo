@@ -109,7 +109,8 @@ func NewDeviceMetadata(devicePath string, example interface{}) (*DeviceMetadata,
 	return metadata, nil
 }
 
-// resolveDevicePath 优先通过元数据管理器解析设备路径，否则使用仓库默认路径
+// resolveDevicePath 优先通过元数据管理器解析设备路径，否则使用仓库默认路径；
+// 约定路径管理器支持零注册：未注册时按模板自动推导路径
 func (r *IotDBRepo) resolveDevicePath(data interface{}) string {
 	if r.metadataManager == nil {
 		return r.devicePath
@@ -120,6 +121,11 @@ func (r *IotDBRepo) resolveDevicePath(data interface{}) string {
 	}
 	if path, err := r.metadataManager.GetDevicePath(deviceId); err == nil && path != "" {
 		return path
+	}
+	if cm, ok := r.metadataManager.(*ConventionPathManager); ok {
+		if path, err := cm.BuildDevicePath(data); err == nil {
+			return path
+		}
 	}
 	return r.devicePath
 }

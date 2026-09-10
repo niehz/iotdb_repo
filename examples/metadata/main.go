@@ -1,8 +1,10 @@
-// metadata 示例：演示设备元数据管理器，解决跨设备查询问题
+// metadata 示例：演示约定路径元数据管理器，免手写设备路径
 //
-// 树形模型下无法像TDengine超级表那样一条SQL跨设备查询，
-// 通过元数据管理器维护 deviceId -> devicePath 映射与设备标签，
-// 业务层按标签筛选设备后再查询各设备路径。
+// 核心思路：路径模板 root.factory.{region}.{deviceId}
+//   - 注册时只传设备信息，路径按模板自动生成（RegisterDeviceAuto）
+//   - 标签就是路径段：ListDevicesByTag 直查 IoTDB（show timeseries 前缀扫描），
+//     新设备无需注册即可被查询到
+//   - 写入时未注册的设备也能按模板自动推导路径（零注册直写）
 //
 // 运行方式（需要先启动 IoTDB 服务，默认 127.0.0.1:6667 root/root）：
 //
@@ -18,20 +20,21 @@ import (
 	"github.com/niehz/iotdb_repo"
 )
 
-// DeviceInfo 设备注册信息（仅用于元数据管理）
-// gorm:"tag:xxx" 用于按标签检索设备
+// DeviceInfo 设备注册信息
+// gorm:"tag:xxx" 字段的值填充路径模板中的 {xxx} 占位符
 type DeviceInfo struct {
 	DeviceId string `iotdb:"device_path"`
 	Region   string `gorm:"tag:region"`
 	Status   bool   `gorm:"tag:status"`
 }
 
-// DeviceMetric 设备测点数据，DeviceId 通过 iotdb:"-" 排除出测点，仅用于路径解析
+// DeviceMetric 设备测点数据，DeviceId/Region 用于路径解析，iotdb:"-" 排除出测点
 type DeviceMetric struct {
 	Time        int64   `iotdb:"time"`
 	Temperature float64 `iotdb:"temperature"`
 	Pressure    float64 `iotdb:"pressure"`
 	DeviceId    string  `iotdb:"-"`
+	Region      string  `gorm:"tag:region"`
 }
 
 func main() {
@@ -47,45 +50,94 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 1. 注册设备到元数据管理器
-	manager := iotdborm.NewMemoryDeviceMetadataManager()
+	// 1. 创建约定路径管理器：路径 = 模板自动生成，标签 = 路径段
+	manager, err := iotdborm.NewConventionPathManager("root.factory.{region}.{deviceId}", pool)
+	if err != nil {
+		log.Fatal("创建约定路径管理器失败: ", err)
+	}
+	fmt.Println("1. 约定路径管理器创建成功，模板: root.factory.{region}.{deviceId}")
 
-	devices := []struct {
-		info DeviceInfo
-		path string
-	}{
-		{DeviceInfo{DeviceId: "device01", Region: "north", Status: true}, "root.factory.north.device01"},
-		{DeviceInfo{DeviceId: "device02", Region: "north", Status: true}, "root.factory.north.device02"},
-		{DeviceInfo{DeviceId: "device03", Region: "south", Status: false}, "root.factory.south.device03"},
+	// 2. 注册设备：只传设备信息，路径自动生成
+	devices := []DeviceInfo{
+		{DeviceId: "device01", Region: "north", Status: true},
+		{DeviceId: "device02", Region: "north", Status: true},
+		{DeviceId: "device03", Region: "south", Status: false},
 	}
 	for _, d := range devices {
-		if err := manager.RegisterDevice(d.path, d.info); err != nil {
-			log.Fatalf("注册设备 %s 失败: %v", d.info.DeviceId, err)
+		if err := manager.RegisterDeviceAuto(d); err != nil {
+			log.Fatalf("注册设备 %s 失败: %v", d.DeviceId, err)
 		}
-		fmt.Printf("1. 注册设备: %s -> %s\n", d.info.DeviceId, d.path)
+		fmt.Printf("2. 注册设备（路径自动生成）: %s -> %s\n", d.DeviceId, resolvePath(manager, d))
 	}
 
-	// 2. 按ID获取设备路径
-	if path, err := manager.GetDevicePath("device02"); err == nil {
-		fmt.Printf("2. device02 的路径: %s\n", path)
-	}
-
-	// 3. 按标签筛选设备（例如查询north区域的所有设备）
+	// 3. 按标签查询设备：直查IoTDB，无需维护注册表
 	deviceIds, err := manager.ListDevicesByTag("region", "north")
 	if err != nil {
 		log.Fatal("按标签查询失败: ", err)
 	}
-	fmt.Printf("3. north区域的设备: %v\n", deviceIds)
+	fmt.Printf("3. north区域设备（直查IoTDB）: %v\n", deviceIds)
 
-	// 4. 字段映射管理
-	if err := manager.RegisterFieldMapping("device01", "TempAlias", "temperature"); err != nil {
-		log.Fatal("注册字段映射失败: ", err)
+	// 4. 设备路径列表（show timeseries 前缀扫描）
+	paths, err := manager.ListDevicePaths("root.factory.**")
+	if err != nil {
+		log.Fatal("设备路径列表失败: ", err)
 	}
-	if tag, err := manager.GetFieldMapping("device01", "TempAlias"); err == nil {
-		fmt.Printf("4. device01.TempAlias 映射到测点: %s\n", tag)
+	fmt.Printf("4. IoTDB中的设备路径（自动发现）: %v\n", paths)
+
+	// 5. 一键同步存量设备到注册表
+	n, err := manager.SyncDevices("root.factory.**")
+	if err != nil {
+		log.Fatal("同步设备失败: ", err)
+	}
+	fmt.Printf("5. 同步存量设备完成，新增 %d 个\n", n)
+
+	// 6. 零注册直写：新设备无需注册，路径按模板自动推导
+	now := time.Now().UnixMilli()
+	allDevices := append(devices, DeviceInfo{DeviceId: "device04", Region: "north", Status: true})
+	repo := iotdborm.NewRepoWithMetadata(pool, "", manager)
+	for _, d := range allDevices {
+		path := resolvePath(manager, d)
+		md, err := iotdborm.NewDeviceMetadata(path, DeviceMetric{})
+		if err != nil {
+			log.Fatal("构建设备元数据失败: ", err)
+		}
+		if err := repo.CreateTimeseries(md); err != nil {
+			fmt.Printf("   创建时间序列失败（可能已存在）: %s\n", path)
+		}
+		if err := repo.Create(&DeviceMetric{
+			Time:        now,
+			Temperature: 26.0,
+			Pressure:    101.0,
+			DeviceId:    d.DeviceId,
+			Region:      d.Region,
+		}); err != nil {
+			log.Fatalf("写入 %s 失败: %v", d.DeviceId, err)
+		}
+	}
+	fmt.Println("6. 零注册直写成功（device04 未注册也按模板落到了 root.factory.north.device04）")
+
+	// 7. 直查新设备数据：north 区域现在包含 device04
+	deviceIds, err = manager.ListDevicesByTag("region", "north")
+	if err != nil {
+		log.Fatal("按标签查询失败: ", err)
+	}
+	fmt.Printf("7. 写入后north区域设备（实时）: %v\n", deviceIds)
+
+	for _, id := range deviceIds {
+		path, err := manager.GetDevicePath(id)
+		if err != nil {
+			continue
+		}
+		r := iotdborm.NewRepo(pool, path)
+		var data []DeviceMetric
+		if err := r.Find(&data); err != nil {
+			log.Printf("查询 %s 失败: %v", path, err)
+			continue
+		}
+		fmt.Printf("   %s 查询到 %d 条数据\n", id, len(data))
 	}
 
-	// 5. 跨设备查询计划：先得到设备列表与路径，再逐个查询
+	// 8. 兼容能力：跨设备查询计划
 	results, err := manager.QueryMultipleDevices(
 		deviceIds,
 		time.Now().Add(-time.Hour).UnixMilli(),
@@ -95,50 +147,22 @@ func main() {
 	if err != nil {
 		log.Fatal("跨设备查询失败: ", err)
 	}
-	fmt.Printf("5. 跨设备查询计划生成 %d 个目标:\n", len(results))
+	fmt.Printf("8. 跨设备查询计划生成 %d 个目标:\n", len(results))
 	for _, r := range results {
 		fmt.Printf("   %s -> %s, 测点: %v\n", r.DeviceId, r.DevicePath, r.Measurements)
 	}
 
-	// 6. 带元数据管理的Repository：写入时自动把 deviceId 解析为设备路径
-	now := time.Now().UnixMilli()
-	for _, d := range devices {
-		// 初始化时间序列
-		repo := iotdborm.NewRepoWithMetadata(pool, "", manager)
-		md, err := iotdborm.NewDeviceMetadata(d.path, DeviceMetric{})
-		if err != nil {
-			log.Fatal("构建设备元数据失败: ", err)
-		}
-		if err := repo.CreateTimeseries(md); err != nil {
-			fmt.Printf("   创建时间序列失败（可能已存在）: %s: %v\n", d.path, err)
-		}
+	fmt.Println("\n提示：路径无稳定规律时，仍可用 iotdborm.NewMemoryDeviceMetadataManager 显式注册")
+	fmt.Println("元数据管理示例完成")
+}
 
-		// 写入时无需关心路径，自动解析
-		if err := repo.Create(&DeviceMetric{
-			Time:        now,
-			Temperature: 26.0,
-			Pressure:    101.0,
-			DeviceId:    d.info.DeviceId,
-		}); err != nil {
-			log.Fatalf("写入 %s 失败: %v", d.info.DeviceId, err)
-		}
-		fmt.Printf("6. 写入成功（自动解析路径）: %s -> %s\n", d.info.DeviceId, d.path)
+func resolvePath(manager *iotdborm.ConventionPathManager, d DeviceInfo) string {
+	if path, err := manager.GetDevicePath(d.DeviceId); err == nil {
+		return path
 	}
-
-	// 7. 按解析后的路径查询各设备数据
-	for _, d := range devices {
-		repo := iotdborm.NewRepo(pool, d.path)
-		var data []DeviceMetric
-		if err := repo.Find(&data); err != nil {
-			log.Printf("查询 %s 失败: %v", d.path, err)
-			continue
-		}
-		fmt.Printf("7. %s 查询到 %d 条数据\n", d.info.DeviceId, len(data))
-		for _, m := range data {
-			fmt.Printf("   time=%s temp=%.1f pressure=%.1f\n",
-				time.UnixMilli(m.Time).Format("15:04:05"), m.Temperature, m.Pressure)
-		}
+	path, err := manager.BuildDevicePath(d)
+	if err != nil {
+		panic(err)
 	}
-
-	fmt.Println("\n元数据管理示例完成")
+	return path
 }
